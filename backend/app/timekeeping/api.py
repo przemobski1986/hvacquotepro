@@ -758,3 +758,145 @@ def report_monthly(
     date_from = date(year, month, 1)
     date_to = date(year, month, last_day)
     return _aggregate_range(db, date_from, date_to, vehicle_id=vehicle_id, employee_id=employee_id)
+
+# -----------------------
+# CSV Exports
+# -----------------------
+
+from io import StringIO
+import csv
+from fastapi.responses import Response
+
+def _csv_response(filename: str, header: list[str], rows: list[list[object]]) -> Response:
+    buf = StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(header)
+    for r in rows:
+        w.writerow(r)
+
+    content = "\ufeff" + buf.getvalue()
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+def _date_add_days(d: date, days: int) -> date:
+    return date.fromordinal(d.toordinal() + days)
+
+def _range_report(db: Session, date_from: date, date_to: date, vehicle_id: Optional[int], employee_id: Optional[int]) -> RangeReportOut:
+    return _aggregate_range(db, date_from, date_to, vehicle_id=vehicle_id, employee_id=employee_id)
+
+def _weekly_report(db: Session, week_start: date, vehicle_id: Optional[int], employee_id: Optional[int]) -> RangeReportOut:
+    return _aggregate_range(db, week_start, _date_add_days(week_start, 6), vehicle_id=vehicle_id, employee_id=employee_id)
+
+def _monthly_report(db: Session, year: int, month: int, vehicle_id: Optional[int], employee_id: Optional[int]) -> RangeReportOut:
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="month must be 1..12")
+    last_day = monthrange(year, month)[1]
+    return _aggregate_range(db, date(year, month, 1), date(year, month, last_day), vehicle_id=vehicle_id, employee_id=employee_id)
+
+@router.get("/reports/range/employees.csv")
+def report_range_employees_csv(
+    date_from: date,
+    date_to: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _range_report(db, date_from, date_to, vehicle_id, employee_id)
+    rows = [[e.employee_id, e.full_name, e.minutes, e.segments] for e in rep.employees]
+    return _csv_response("range_employees.csv", ["employee_id", "full_name", "minutes", "segments"], rows)
+
+@router.get("/reports/range/vehicles.csv")
+def report_range_vehicles_csv(
+    date_from: date,
+    date_to: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _range_report(db, date_from, date_to, vehicle_id, employee_id)
+    rows = [[v.vehicle_id, v.plate, v.minutes, v.segments] for v in rep.vehicles]
+    return _csv_response("range_vehicles.csv", ["vehicle_id", "plate", "minutes", "segments"], rows)
+
+@router.get("/reports/range/sites.csv")
+def report_range_sites_csv(
+    date_from: date,
+    date_to: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _range_report(db, date_from, date_to, vehicle_id, employee_id)
+    rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
+    return _csv_response("range_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
+
+@router.get("/reports/weekly/employees.csv")
+def report_weekly_employees_csv(
+    week_start: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _weekly_report(db, week_start, vehicle_id, employee_id)
+    rows = [[e.employee_id, e.full_name, e.minutes, e.segments] for e in rep.employees]
+    return _csv_response("weekly_employees.csv", ["employee_id", "full_name", "minutes", "segments"], rows)
+
+@router.get("/reports/weekly/vehicles.csv")
+def report_weekly_vehicles_csv(
+    week_start: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _weekly_report(db, week_start, vehicle_id, employee_id)
+    rows = [[v.vehicle_id, v.plate, v.minutes, v.segments] for v in rep.vehicles]
+    return _csv_response("weekly_vehicles.csv", ["vehicle_id", "plate", "minutes", "segments"], rows)
+
+@router.get("/reports/weekly/sites.csv")
+def report_weekly_sites_csv(
+    week_start: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _weekly_report(db, week_start, vehicle_id, employee_id)
+    rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
+    return _csv_response("weekly_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
+
+@router.get("/reports/monthly/employees.csv")
+def report_monthly_employees_csv(
+    year: int,
+    month: int,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _monthly_report(db, year, month, vehicle_id, employee_id)
+    rows = [[e.employee_id, e.full_name, e.minutes, e.segments] for e in rep.employees]
+    return _csv_response("monthly_employees.csv", ["employee_id", "full_name", "minutes", "segments"], rows)
+
+@router.get("/reports/monthly/vehicles.csv")
+def report_monthly_vehicles_csv(
+    year: int,
+    month: int,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _monthly_report(db, year, month, vehicle_id, employee_id)
+    rows = [[v.vehicle_id, v.plate, v.minutes, v.segments] for v in rep.vehicles]
+    return _csv_response("monthly_vehicles.csv", ["vehicle_id", "plate", "minutes", "segments"], rows)
+
+@router.get("/reports/monthly/sites.csv")
+def report_monthly_sites_csv(
+    year: int,
+    month: int,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    rep = _monthly_report(db, year, month, vehicle_id, employee_id)
+    rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
+    return _csv_response("monthly_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
