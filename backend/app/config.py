@@ -1,6 +1,8 @@
 from pydantic_settings import BaseSettings
 from pydantic import AnyHttpUrl
 from typing import List
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
     ENV: str = "dev"
@@ -24,7 +26,9 @@ class Settings(BaseSettings):
         return [x.strip() for x in self.CORS_ORIGINS.split(",") if x.strip()]
 
     class Config:
-        env_file = ".env"
+        env_file = str(BASE_DIR / ".env")
         extra = "ignore"
 
 settings = Settings()
+
+

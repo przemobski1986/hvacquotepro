@@ -1,4 +1,8 @@
-﻿$ErrorActionPreference = "Stop"
+﻿Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
+
+$ErrorActionPreference = "Stop"
 
 python .\check_no_func_now.py
 
@@ -24,3 +28,4 @@ try {
     Stop-Process -Id $uv.Id -Force
   }
 }
+
