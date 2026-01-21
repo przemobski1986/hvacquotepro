@@ -33,3 +33,32 @@ class CrewSegmentOut(BaseModel):
 
 class SegmentStartIn(BaseModel):
     site_id: int
+
+from datetime import date
+from pydantic import BaseModel
+from typing import List
+
+class DailyEmployeeTotal(BaseModel):
+    employee_id: int
+    full_name: str
+    minutes: int
+    segments: int
+
+class DailySiteTotal(BaseModel):
+    site_id: int
+    name: str
+    minutes: int
+    segments: int
+
+class DailyCrewLogTotal(BaseModel):
+    crew_log_id: int
+    vehicle_id: int
+    minutes: int
+    segments: int
+
+class DailyReportOut(BaseModel):
+    work_date: date
+    total_minutes: int
+    employees: List[DailyEmployeeTotal]
+    sites: List[DailySiteTotal]
+    crew_logs: List[DailyCrewLogTotal]

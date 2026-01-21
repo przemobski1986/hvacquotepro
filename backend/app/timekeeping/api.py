@@ -3,7 +3,7 @@
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
-from .schemas import CrewSegmentCreate, CrewSegmentClose, CrewSegmentOut, SegmentStartIn
+from .schemas import CrewSegmentCreate, CrewSegmentClose, CrewSegmentOut, SegmentStartIn, DailyReportOut, DailyEmployeeTotal, DailySiteTotal, DailyCrewLogTotal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -443,3 +443,132 @@ def crew_log_summary(log_id: int, db: Session = Depends(get_db)):
 
 
 
+
+
+# -----------------------
+# Reports
+# -----------------------
+
+@router.get("/reports/daily", response_model=DailyReportOut)
+def report_daily(
+    work_date: date,
+    vehicle_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    q = (
+        db.query(
+            TkCrewWorkSegment.crew_log_id,
+            TkCrewWorkSegment.site_id,
+            TkCrewWorkSegment.start_at,
+            TkCrewWorkSegment.end_at,
+            TkCrewLog.vehicle_id.label("vehicle_id"),
+        )
+        .join(TkCrewLog, TkCrewLog.id == TkCrewWorkSegment.crew_log_id)
+        .filter(TkCrewLog.work_date == work_date)
+        .filter(TkCrewWorkSegment.end_at.isnot(None))
+    )
+
+    if vehicle_id is not None:
+        q = q.filter(TkCrewLog.vehicle_id == vehicle_id)
+
+    segments = q.all()
+
+    crew_log_ids = sorted({s.crew_log_id for s in segments})
+    site_ids = sorted({s.site_id for s in segments})
+
+    sites_by_id = {}
+    if site_ids:
+        for s in db.query(TkSite).filter(TkSite.id.in_(site_ids)).all():
+            sites_by_id[s.id] = s.name
+
+    crewlog_vehicle = {}
+    if crew_log_ids:
+        for cl in db.query(TkCrewLog).filter(TkCrewLog.id.in_(crew_log_ids)).all():
+            crewlog_vehicle[cl.id] = cl.vehicle_id
+
+    members_by_log = defaultdict(list)
+    if crew_log_ids:
+        members = (
+            db.query(TkCrewLogMember)
+            .filter(TkCrewLogMember.crew_log_id.in_(crew_log_ids))
+            .all()
+        )
+        for m in members:
+            members_by_log[m.crew_log_id].append(m.employee_id)
+
+    employees_by_id = {}
+    if crew_log_ids:
+        emp_ids = sorted({eid for ids in members_by_log.values() for eid in ids})
+        if emp_ids:
+            for e in db.query(TkEmployee).filter(TkEmployee.id.in_(emp_ids)).all():
+                employees_by_id[e.id] = e.full_name
+
+    site_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
+    crewlog_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
+    employee_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
+
+    total_minutes = 0
+
+    for s in segments:
+        start_at = s.start_at
+        end_at = s.end_at
+        if not end_at:
+            continue
+
+        minutes = int(max(0, (end_at - start_at).total_seconds() // 60))
+        total_minutes += minutes
+
+        site_totals[s.site_id]["minutes"] += minutes
+        site_totals[s.site_id]["segments"] += 1
+
+        crewlog_totals[s.crew_log_id]["minutes"] += minutes
+        crewlog_totals[s.crew_log_id]["segments"] += 1
+
+        emp_ids = members_by_log.get(s.crew_log_id, [])
+        if employee_id is not None:
+            emp_ids = [x for x in emp_ids if x == employee_id]
+
+        if emp_ids:
+            per_emp = minutes // len(emp_ids) if len(emp_ids) > 0 else 0
+            for eid in emp_ids:
+                employee_totals[eid]["minutes"] += per_emp
+                employee_totals[eid]["segments"] += 1
+
+    employees_out = [
+        DailyEmployeeTotal(
+            employee_id=eid,
+            full_name=employees_by_id.get(eid, f"Employee {eid}"),
+            minutes=vals["minutes"],
+            segments=vals["segments"],
+        )
+        for eid, vals in sorted(employee_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
+    ]
+
+    sites_out = [
+        DailySiteTotal(
+            site_id=sid,
+            name=sites_by_id.get(sid, f"Site {sid}"),
+            minutes=vals["minutes"],
+            segments=vals["segments"],
+        )
+        for sid, vals in sorted(site_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
+    ]
+
+    crew_logs_out = [
+        DailyCrewLogTotal(
+            crew_log_id=clid,
+            vehicle_id=crewlog_vehicle.get(clid, 0),
+            minutes=vals["minutes"],
+            segments=vals["segments"],
+        )
+        for clid, vals in sorted(crewlog_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
+    ]
+
+    return DailyReportOut(
+        work_date=work_date,
+        total_minutes=total_minutes,
+        employees=employees_out,
+        sites=sites_out,
+        crew_logs=crew_logs_out,
+    )
