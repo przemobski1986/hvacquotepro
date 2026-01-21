@@ -24,7 +24,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
+          cache: "pip"
+          cache-dependency-path: |
+            backend/pyproject.toml
       - name: Install project
         run: |
           python -m pip install --upgrade pip
@@ -34,5 +36,7 @@ jobs:
         shell: powershell
         run: |
           powershell -ExecutionPolicy Bypass -File .\run_smoke_isolated.ps1
+
+
 
 
