@@ -62,3 +62,27 @@ class DailyReportOut(BaseModel):
     employees: List[DailyEmployeeTotal]
     sites: List[DailySiteTotal]
     crew_logs: List[DailyCrewLogTotal]
+
+from datetime import date
+from pydantic import BaseModel
+from typing import List
+
+class RangeDayTotal(BaseModel):
+    work_date: date
+    minutes: int
+    segments: int
+
+class RangeVehicleTotal(BaseModel):
+    vehicle_id: int
+    plate: str
+    minutes: int
+    segments: int
+
+class RangeReportOut(BaseModel):
+    date_from: date
+    date_to: date
+    total_minutes: int
+    days: List[RangeDayTotal]
+    employees: List[DailyEmployeeTotal]
+    sites: List[DailySiteTotal]
+    vehicles: List[RangeVehicleTotal]
