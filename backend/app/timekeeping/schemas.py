@@ -1,13 +1,14 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel
 
 
 class CrewSegmentCreate(BaseModel):
     site_id: int
+    segment_type: Literal["work","travel"] = "work"
     start_at: datetime
     end_at: Optional[datetime] = None
 
@@ -20,6 +21,7 @@ class CrewSegmentOut(BaseModel):
     id: int
     crew_log_id: int
     site_id: int
+    segment_type: str
     start_at: datetime
     end_at: Optional[datetime]
     start_lat: float

@@ -17,6 +17,7 @@ from app.timekeeping.models import (
     TkEmployee,
     TkVehicle,
     TkSite,
+    TkSegmentType,
 )
 
 router = APIRouter(prefix="/timekeeping", tags=["timekeeping"])
@@ -300,9 +301,51 @@ def add_segment(log_id: int, payload: CrewSegmentCreate, db: Session = Depends(g
     if site.lat is None or site.lng is None:
         raise HTTPException(status_code=422, detail="Site is missing lat/lng")
 
+    
+    AUTO_TRAVEL_GAP = True
+    
+    try:
+        is_work = (getattr(payload, "segment_type", None) in (None, "work", TkSegmentType.work))
+    except Exception:
+        is_work = True
+    
+    if is_work and payload.start_at:
+        last = (
+            db.query(TkCrewWorkSegment)
+            .filter(TkCrewWorkSegment.crew_log_id == log_id)
+            .filter(TkCrewWorkSegment.end_at.isnot(None))
+            .order_by(TkCrewWorkSegment.end_at.desc())
+            .first()
+        )
+        last_end = last.end_at if last else None
+        start_dt = payload.start_at
+        try:
+            if last_end is not None and getattr(last_end, "tzinfo", None) is not None:
+                last_end = last_end.replace(tzinfo=None)
+            if start_dt is not None and getattr(start_dt, "tzinfo", None) is not None:
+                start_dt = start_dt.replace(tzinfo=None)
+        except Exception:
+            pass
+        if last_end and start_dt and last_end < start_dt:
+            gap_min = int((start_dt - last_end).total_seconds() // 60)
+            if gap_min > 0:
+                travel = TkCrewWorkSegment(
+                    crew_log_id=log_id,
+                    site_id=payload.site_id,
+                    segment_type=TkSegmentType.travel,
+                    start_at=last_end,
+                    end_at=start_dt,
+                    start_lat=site.lat,
+                    start_lng=site.lng,
+                    end_lat=site.lat,
+                    end_lng=site.lng,
+                )
+                db.add(travel)
+    
     seg = TkCrewWorkSegment(
         crew_log_id=log_id,
         site_id=payload.site_id,
+        segment_type=getattr(payload, "segment_type", None) or TkSegmentType.work,
         start_at=payload.start_at,
         end_at=payload.end_at,
         start_lat=site.lat,
@@ -900,3 +943,4 @@ def report_monthly_sites_csv(
     rep = _monthly_report(db, year, month, vehicle_id, employee_id)
     rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
     return _csv_response("monthly_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
+

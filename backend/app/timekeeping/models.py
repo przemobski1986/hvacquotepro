@@ -36,6 +36,11 @@ class TkDailyStatus(str, Enum):
     nieobecny_do_klasyfikacji = "nieobecny_do_klasyfikacji"
 
 
+class TkSegmentType(str, Enum):
+    work = "work"
+    travel = "travel"
+
+
 class TkEmployee(Base):
     __tablename__ = "tk_employees"
 
@@ -118,6 +123,8 @@ class TkCrewWorkSegment(Base):
     crew_log_id = Column(Integer, ForeignKey("tk_crew_logs.id"), nullable=False, index=True)
     site_id = Column(Integer, ForeignKey("tk_sites.id"), nullable=False, index=True)
 
+    segment_type = Column(SAEnum(TkSegmentType, name="tk_segment_type"), nullable=False, default=TkSegmentType.work)
+
     start_at = Column(DateTime(timezone=True), nullable=False, index=True)
     end_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
@@ -162,6 +169,7 @@ class TkDailyStatusOverride(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     employee = relationship("TkEmployee", lazy="joined", foreign_keys=[employee_id])
+
 
 
 
