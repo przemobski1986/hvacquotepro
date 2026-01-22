@@ -6,3 +6,9 @@ backend/*.db
 # Python cache
 **/__pycache__/
 **/*.pyc
+
+# local backups
+*.bak_*
+*.log
+backend/.pytest_cache/
+

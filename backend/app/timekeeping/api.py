@@ -3,7 +3,7 @@
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
-from .schemas import CrewSegmentCreate, CrewSegmentClose, CrewSegmentOut, SegmentStartIn, DailyReportOut, DailyEmployeeTotal, DailySiteTotal, DailyCrewLogTotal, RangeReportOut, RangeDayTotal, RangeVehicleTotal
+from .schemas import CrewSegmentCreate, CrewSegmentClose, CrewSegmentOut, SegmentStartIn, DailyReportOut, DailyEmployeeTotal, DailySiteTotal, DailyCrewLogTotal, RangeReportOut, RangeDayTotal, RangeVehicleTotal, RangeEmployeeTotal, RangeSiteTotal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -454,6 +454,7 @@ def crew_log_summary(log_id: int, db: Session = Depends(get_db)):
 
     for seg in segs:
         minutes = int((seg.end_at - seg.start_at).total_seconds() // 60)
+        is_travel = (getattr(s, "segment_type", None) == "travel")
         if minutes < 0:
             minutes = 0
         total += minutes
@@ -547,9 +548,9 @@ def report_daily(
             for e in db.query(TkEmployee).filter(TkEmployee.id.in_(emp_ids)).all():
                 employees_by_id[e.id] = e.full_name
 
-    site_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
-    crewlog_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
-    employee_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
+    site_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0, "work_minutes": 0, "travel_minutes": 0})
+    crewlog_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0, "work_minutes": 0, "travel_minutes": 0})
+    employee_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0, "work_minutes": 0, "travel_minutes": 0})
 
     total_minutes = 0
 
@@ -563,9 +564,23 @@ def report_daily(
         total_minutes += minutes
 
         site_totals[s.site_id]["minutes"] += minutes
+        is_travel = (getattr(s, "segment_type", None) == "travel")
+        if is_travel:
+            site_totals[s.site_id]["travel_minutes"] += minutes
+        else:
+            site_totals[s.site_id]["work_minutes"] += minutes
         site_totals[s.site_id]["segments"] += 1
 
         crewlog_totals[s.crew_log_id]["minutes"] += minutes
+
+        if is_travel:
+            crewlog_totals[s.crew_log_id]["travel_minutes"] += minutes
+        else:
+            crewlog_totals[s.crew_log_id]["work_minutes"] += minutes
+        if is_travel:
+            crewlog_totals[s.crew_log_id]["travel_minutes"] += minutes
+        else:
+            crewlog_totals[s.crew_log_id]["work_minutes"] += minutes
         crewlog_totals[s.crew_log_id]["segments"] += 1
 
         emp_ids = members_by_log.get(s.crew_log_id, [])
@@ -576,6 +591,11 @@ def report_daily(
             per_emp = minutes // len(emp_ids) if len(emp_ids) > 0 else 0
             for eid in emp_ids:
                 employee_totals[eid]["minutes"] += per_emp
+                is_travel = (getattr(s, "segment_type", None) == "travel")
+                if is_travel:
+                    employee_totals[eid]["travel_minutes"] += per_emp
+                else:
+                    employee_totals[eid]["work_minutes"] += per_emp
                 employee_totals[eid]["segments"] += 1
 
     employees_out = [
@@ -583,6 +603,8 @@ def report_daily(
             employee_id=eid,
             full_name=employees_by_id.get(eid, f"Employee {eid}"),
             minutes=vals["minutes"],
+            work_minutes=vals.get("work_minutes", 0),
+            travel_minutes=vals.get("travel_minutes", 0),
             segments=vals["segments"],
         )
         for eid, vals in sorted(employee_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
@@ -593,6 +615,8 @@ def report_daily(
             site_id=sid,
             name=sites_by_id.get(sid, f"Site {sid}"),
             minutes=vals["minutes"],
+            work_minutes=vals.get("work_minutes", 0),
+            travel_minutes=vals.get("travel_minutes", 0),
             segments=vals["segments"],
         )
         for sid, vals in sorted(site_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
@@ -603,173 +627,36 @@ def report_daily(
             crew_log_id=clid,
             vehicle_id=crewlog_vehicle.get(clid, 0),
             minutes=vals["minutes"],
+            work_minutes=vals.get("work_minutes", 0),
+            travel_minutes=vals.get("travel_minutes", 0),
             segments=vals["segments"],
         )
         for clid, vals in sorted(crewlog_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
     ]
 
+    def _val(x, k):
+        return x.get(k, 0) if isinstance(x, dict) else getattr(x, k, 0)
+
+    minutes_total = sum(_val(x, "minutes") for x in crew_logs_out) if crew_logs_out else 0
+    work_minutes_total = sum(_val(x, "work_minutes") for x in crew_logs_out) if crew_logs_out else 0
+    travel_minutes_total = sum(_val(x, "travel_minutes") for x in crew_logs_out) if crew_logs_out else 0
+
     return DailyReportOut(
         work_date=work_date,
-        total_minutes=total_minutes,
+        total_minutes=minutes_total,
+        work_minutes=work_minutes_total,
+        travel_minutes=travel_minutes_total,
         employees=employees_out,
         sites=sites_out,
         crew_logs=crew_logs_out,
     )
-
-
-# -----------------------
-# Range Reports
-# -----------------------
-
-from calendar import monthrange
-
-def _aggregate_range(
-    db: Session,
-    date_from: date,
-    date_to: date,
-    vehicle_id: Optional[int] = None,
-    employee_id: Optional[int] = None,
-) -> RangeReportOut:
-    if date_to < date_from:
-        raise HTTPException(status_code=400, detail="date_to must be >= date_from")
-
-    q = (
-        db.query(
-            TkCrewWorkSegment.crew_log_id,
-            TkCrewWorkSegment.site_id,
-            TkCrewWorkSegment.start_at,
-            TkCrewWorkSegment.end_at,
-            TkCrewLog.work_date.label("work_date"),
-            TkCrewLog.vehicle_id.label("vehicle_id"),
-        )
-        .join(TkCrewLog, TkCrewLog.id == TkCrewWorkSegment.crew_log_id)
-        .filter(TkCrewLog.work_date >= date_from)
-        .filter(TkCrewLog.work_date <= date_to)
-        .filter(TkCrewWorkSegment.end_at.isnot(None))
-    )
-
-    if vehicle_id is not None:
-        q = q.filter(TkCrewLog.vehicle_id == vehicle_id)
-
-    segments = q.all()
-
-    crew_log_ids = sorted({s.crew_log_id for s in segments})
-    site_ids = sorted({s.site_id for s in segments})
-    vehicle_ids = sorted({s.vehicle_id for s in segments})
-
-    sites_by_id = {}
-    if site_ids:
-        for s in db.query(TkSite).filter(TkSite.id.in_(site_ids)).all():
-            sites_by_id[s.id] = s.name
-
-    vehicles_by_id = {}
-    if vehicle_ids:
-        for v in db.query(TkVehicle).filter(TkVehicle.id.in_(vehicle_ids)).all():
-            vehicles_by_id[v.id] = v.plate
-
-    members_by_log = defaultdict(list)
-    if crew_log_ids:
-        members = (
-            db.query(TkCrewLogMember)
-            .filter(TkCrewLogMember.crew_log_id.in_(crew_log_ids))
-            .all()
-        )
-        for m in members:
-            members_by_log[m.crew_log_id].append(m.employee_id)
-
-    employees_by_id = {}
-    if crew_log_ids:
-        emp_ids = sorted({eid for ids in members_by_log.values() for eid in ids})
-        if emp_ids:
-            for e in db.query(TkEmployee).filter(TkEmployee.id.in_(emp_ids)).all():
-                employees_by_id[e.id] = e.full_name
-
-    day_totals: Dict[date, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
-    site_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
-    vehicle_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
-    employee_totals: Dict[int, Dict[str, int]] = defaultdict(lambda: {"minutes": 0, "segments": 0})
-
-    total_minutes = 0
-
-    for s in segments:
-        if not s.end_at:
-            continue
-
-        minutes = int(max(0, (s.end_at - s.start_at).total_seconds() // 60))
-        total_minutes += minutes
-
-        day_totals[s.work_date]["minutes"] += minutes
-        day_totals[s.work_date]["segments"] += 1
-
-        site_totals[s.site_id]["minutes"] += minutes
-        site_totals[s.site_id]["segments"] += 1
-
-        vehicle_totals[s.vehicle_id]["minutes"] += minutes
-        vehicle_totals[s.vehicle_id]["segments"] += 1
-
-        emp_ids = members_by_log.get(s.crew_log_id, [])
-        if employee_id is not None:
-            emp_ids = [x for x in emp_ids if x == employee_id]
-
-        if emp_ids:
-            per_emp = minutes // len(emp_ids) if len(emp_ids) > 0 else 0
-            for eid in emp_ids:
-                employee_totals[eid]["minutes"] += per_emp
-                employee_totals[eid]["segments"] += 1
-
-    days_out = [
-        RangeDayTotal(work_date=d, minutes=v["minutes"], segments=v["segments"])
-        for d, v in sorted(day_totals.items(), key=lambda kv: kv[0])
-    ]
-
-    employees_out = [
-        DailyEmployeeTotal(
-            employee_id=eid,
-            full_name=employees_by_id.get(eid, f"Employee {eid}"),
-            minutes=vals["minutes"],
-            segments=vals["segments"],
-        )
-        for eid, vals in sorted(employee_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
-    ]
-
-    sites_out = [
-        DailySiteTotal(
-            site_id=sid,
-            name=sites_by_id.get(sid, f"Site {sid}"),
-            minutes=vals["minutes"],
-            segments=vals["segments"],
-        )
-        for sid, vals in sorted(site_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
-    ]
-
-    vehicles_out = [
-        RangeVehicleTotal(
-            vehicle_id=vid,
-            plate=vehicles_by_id.get(vid, f"Vehicle {vid}"),
-            minutes=vals["minutes"],
-            segments=vals["segments"],
-        )
-        for vid, vals in sorted(vehicle_totals.items(), key=lambda kv: (-(kv[1]["minutes"]), kv[0]))
-    ]
-
-    return RangeReportOut(
-        date_from=date_from,
-        date_to=date_to,
-        total_minutes=total_minutes,
-        days=days_out,
-        employees=employees_out,
-        sites=sites_out,
-        vehicles=vehicles_out,
-    )
-
-
 @router.get("/reports/range", response_model=RangeReportOut)
 def report_range(
-    date_from: date,
-    date_to: date,
-    vehicle_id: Optional[int] = None,
-    employee_id: Optional[int] = None,
-    db: Session = Depends(get_db),
+date_from: date,
+date_to: date,
+vehicle_id: Optional[int] = None,
+employee_id: Optional[int] = None,
+db: Session = Depends(get_db),
 ):
     return _aggregate_range(db, date_from, date_to, vehicle_id=vehicle_id, employee_id=employee_id)
 
@@ -848,8 +735,8 @@ def report_range_employees_csv(
     db: Session = Depends(get_db),
 ):
     rep = _range_report(db, date_from, date_to, vehicle_id, employee_id)
-    rows = [[e.employee_id, e.full_name, e.minutes, e.segments] for e in rep.employees]
-    return _csv_response("range_employees.csv", ["employee_id", "full_name", "minutes", "segments"], rows)
+    rows = [[e.employee_id, e.full_name, e.minutes, e.work_minutes, e.travel_minutes, e.segments] for e in rep.employees]
+    return _csv_response("range_employees.csv", ["employee_id", "full_name", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/range/vehicles.csv")
 def report_range_vehicles_csv(
@@ -860,8 +747,8 @@ def report_range_vehicles_csv(
     db: Session = Depends(get_db),
 ):
     rep = _range_report(db, date_from, date_to, vehicle_id, employee_id)
-    rows = [[v.vehicle_id, v.plate, v.minutes, v.segments] for v in rep.vehicles]
-    return _csv_response("range_vehicles.csv", ["vehicle_id", "plate", "minutes", "segments"], rows)
+    rows = [[v.vehicle_id, v.plate, v.minutes, v.work_minutes, v.travel_minutes, v.segments] for v in rep.vehicles]
+    return _csv_response("range_vehicles.csv", ["vehicle_id", "plate", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/range/sites.csv")
 def report_range_sites_csv(
@@ -872,8 +759,8 @@ def report_range_sites_csv(
     db: Session = Depends(get_db),
 ):
     rep = _range_report(db, date_from, date_to, vehicle_id, employee_id)
-    rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
-    return _csv_response("range_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
+    rows = [[s.site_id, s.name, s.minutes, s.work_minutes, s.travel_minutes, s.segments] for s in rep.sites]
+    return _csv_response("range_sites.csv", ["site_id", "name", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/weekly/employees.csv")
 def report_weekly_employees_csv(
@@ -883,8 +770,8 @@ def report_weekly_employees_csv(
     db: Session = Depends(get_db),
 ):
     rep = _weekly_report(db, week_start, vehicle_id, employee_id)
-    rows = [[e.employee_id, e.full_name, e.minutes, e.segments] for e in rep.employees]
-    return _csv_response("weekly_employees.csv", ["employee_id", "full_name", "minutes", "segments"], rows)
+    rows = [[e.employee_id, e.full_name, e.minutes, e.work_minutes, e.travel_minutes, e.segments] for e in rep.employees]
+    return _csv_response("weekly_employees.csv", ["employee_id", "full_name", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/weekly/vehicles.csv")
 def report_weekly_vehicles_csv(
@@ -894,8 +781,8 @@ def report_weekly_vehicles_csv(
     db: Session = Depends(get_db),
 ):
     rep = _weekly_report(db, week_start, vehicle_id, employee_id)
-    rows = [[v.vehicle_id, v.plate, v.minutes, v.segments] for v in rep.vehicles]
-    return _csv_response("weekly_vehicles.csv", ["vehicle_id", "plate", "minutes", "segments"], rows)
+    rows = [[v.vehicle_id, v.plate, v.minutes, v.work_minutes, v.travel_minutes, v.segments] for v in rep.vehicles]
+    return _csv_response("weekly_vehicles.csv", ["vehicle_id", "plate", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/weekly/sites.csv")
 def report_weekly_sites_csv(
@@ -905,8 +792,8 @@ def report_weekly_sites_csv(
     db: Session = Depends(get_db),
 ):
     rep = _weekly_report(db, week_start, vehicle_id, employee_id)
-    rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
-    return _csv_response("weekly_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
+    rows = [[s.site_id, s.name, s.minutes, s.work_minutes, s.travel_minutes, s.segments] for s in rep.sites]
+    return _csv_response("weekly_sites.csv", ["site_id", "name", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/monthly/employees.csv")
 def report_monthly_employees_csv(
@@ -917,8 +804,8 @@ def report_monthly_employees_csv(
     db: Session = Depends(get_db),
 ):
     rep = _monthly_report(db, year, month, vehicle_id, employee_id)
-    rows = [[e.employee_id, e.full_name, e.minutes, e.segments] for e in rep.employees]
-    return _csv_response("monthly_employees.csv", ["employee_id", "full_name", "minutes", "segments"], rows)
+    rows = [[e.employee_id, e.full_name, e.minutes, e.work_minutes, e.travel_minutes, e.segments] for e in rep.employees]
+    return _csv_response("monthly_employees.csv", ["employee_id", "full_name", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/monthly/vehicles.csv")
 def report_monthly_vehicles_csv(
@@ -929,8 +816,8 @@ def report_monthly_vehicles_csv(
     db: Session = Depends(get_db),
 ):
     rep = _monthly_report(db, year, month, vehicle_id, employee_id)
-    rows = [[v.vehicle_id, v.plate, v.minutes, v.segments] for v in rep.vehicles]
-    return _csv_response("monthly_vehicles.csv", ["vehicle_id", "plate", "minutes", "segments"], rows)
+    rows = [[v.vehicle_id, v.plate, v.minutes, v.work_minutes, v.travel_minutes, v.segments] for v in rep.vehicles]
+    return _csv_response("monthly_vehicles.csv", ["vehicle_id", "plate", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
 
 @router.get("/reports/monthly/sites.csv")
 def report_monthly_sites_csv(
@@ -941,6 +828,16 @@ def report_monthly_sites_csv(
     db: Session = Depends(get_db),
 ):
     rep = _monthly_report(db, year, month, vehicle_id, employee_id)
-    rows = [[s.site_id, s.name, s.minutes, s.segments] for s in rep.sites]
-    return _csv_response("monthly_sites.csv", ["site_id", "name", "minutes", "segments"], rows)
+    rows = [[s.site_id, s.name, s.minutes, s.work_minutes, s.travel_minutes, s.segments] for s in rep.sites]
+    return _csv_response("monthly_sites.csv", ["site_id", "name", "minutes", "work_minutes", "travel_minutes", "segments"], rows)
+
+
+
+
+
+
+
+
+
+
 
